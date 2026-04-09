@@ -7,15 +7,18 @@ Emscripten builds) so you can integrate MWM playback in your own audio player.
 Thanks to the **roboplay** and **libvgm** projects for the core format and
 emulation work that makes this possible.
 
+This has been created in collaboration with (mostly) Anti Gravity with Gemini 3.1 Flash
+and Codex with ChatGPT 5.2 Codex.
+
 ## Project Layout
 
 - `src/` — core sources and public library header
 - `src_libvgm/` — minimal libvgm subset required by this project
-- `modules/` — external sources (`openmsx`, `roboplay`)
-- `music/` — MWM/MWK content
 - `build/` — build output
 - `mwm2wav` — CLI binary (after build)
-- `waves.dat`, `yrw801.rom` — OPL4 ROM/WAVES data used by the tool and library
+- `waves.dat` WAVES data used by the tool and library
+
+yrw801.rom is required for sound generation.
 
 ## Build (CLI)
 
