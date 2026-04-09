@@ -1022,7 +1022,7 @@ int ms_load_waves_file(MSContext *ctx, const char *waves_path) {
     return 0;
   size_t read = fread(ctx->p.waves, 1, 128 * 1024, wf);
   fclose(wf);
-  if (read != 128 * 1024)
+  if (read == 0)
     return 0;
   for (int i = 0; i < 179; i++) {
     ctx->p.waves_ptrs[i] =
@@ -1142,7 +1142,13 @@ int ms_prepare(MSContext *ctx) {
     return 0;
   memset(ctx->p.ram, 0, 2 * 1024 * 1024);
 
-  if (ctx->requires_mwk && ctx->mwk_path_set) {
+  if (ctx->requires_mwk) {
+    if (!ctx->mwk_path_set)
+      return 0;
+    if (!load_mwk(ctx->mwk_path, &ctx->p.kit, ctx->p.ram))
+      return 0;
+    ctx->mwk_loaded = true;
+  } else if (ctx->mwk_path_set) {
     if (load_mwk(ctx->mwk_path, &ctx->p.kit, ctx->p.ram))
       ctx->mwk_loaded = true;
   }

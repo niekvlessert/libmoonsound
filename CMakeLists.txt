@@ -6,7 +6,7 @@ set(CMAKE_C_STANDARD 99)
 option(MOONSOUND_USE_SYSTEM_LIBVGM "Use external libvgm instead of src_libvgm" OFF)
 
 if(MOONSOUND_USE_SYSTEM_LIBVGM)
-    set(LIBVGM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/modules/libvgm)
+    set(LIBVGM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../modules/libvgm)
 else()
     set(LIBVGM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src_libvgm)
 endif()
