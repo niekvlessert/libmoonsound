@@ -10,7 +10,8 @@ emulation work that makes this possible.
 ## Project Layout
 
 - `src/` — core sources and public library header
-- `modules/` — external sources (`libvgm`, `openmsx`, `roboplay`)
+- `src_libvgm/` — minimal libvgm subset required by this project
+- `modules/` — external sources (`openmsx`, `roboplay`)
 - `music/` — MWM/MWK content
 - `build/` — build output
 - `mwm2wav` — CLI binary (after build)
@@ -63,6 +64,18 @@ emcmake cmake -S . -B build-emscripten \
   -DCMAKE_BUILD_TYPE=Release \
   -DMOONSOUND_BUILD_CLI=ON
 ```
+
+## Using External libvgm
+
+If your project already uses libvgm, you can avoid duplicate symbols by
+building libmoonsound against the external libvgm instead of the bundled
+subset:
+
+```bash
+cmake -S . -B build -DMOONSOUND_USE_SYSTEM_LIBVGM=ON
+```
+
+This switches the include path and sources back to `modules/libvgm`.
 
 ## Library API
 
