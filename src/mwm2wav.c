@@ -572,6 +572,39 @@ void get_executable_dir(const char *argv0, char *out, size_t out_size) {
   strncpy(out, ".", out_size - 1);
   out[out_size - 1] = '\0';
 }
+
+static bool file_exists_readable(const char *path) {
+  if (!path || !path[0])
+    return false;
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return false;
+  fclose(f);
+  return true;
+}
+
+static void resolve_cli_asset_path(const char *exe_dir, const char *filename,
+                                   char *out, size_t out_size) {
+  if (!out || out_size == 0)
+    return;
+  out[0] = '\0';
+  if (!filename || !filename[0])
+    return;
+
+  if (exe_dir && exe_dir[0]) {
+    char exe_candidate[512] = {0};
+    snprintf(exe_candidate, sizeof(exe_candidate), "%s/%s", exe_dir, filename);
+    if (file_exists_readable(exe_candidate)) {
+      strncpy(out, exe_candidate, out_size - 1);
+      out[out_size - 1] = '\0';
+      return;
+    }
+  }
+
+  // Fallback: current working directory
+  strncpy(out, filename, out_size - 1);
+  out[out_size - 1] = '\0';
+}
 #endif
 
 void handle_pitch_bend(Player *p, int ch) {
@@ -1533,8 +1566,8 @@ int main(int argc, char **argv) {
   // Resolve ROM/WAVES paths relative to the executable location.
   char exe_path[512] = {0};
   get_executable_dir(argv[0], exe_path, sizeof(exe_path));
-  snprintf(rom_path, sizeof(rom_path), "%s/%s", exe_path, "yrw801.rom");
-  snprintf(waves_path, sizeof(waves_path), "%s/%s", exe_path, "waves.dat");
+  resolve_cli_asset_path(exe_path, "yrw801.rom", rom_path, sizeof(rom_path));
+  resolve_cli_asset_path(exe_path, "waves.dat", waves_path, sizeof(waves_path));
 
   Player p = {0};
   p.seconds = seconds;
