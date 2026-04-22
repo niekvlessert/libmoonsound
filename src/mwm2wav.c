@@ -148,6 +148,7 @@ typedef struct {
   uint8_t last_note;
   uint8_t current_wave;
   uint8_t volume;
+  uint8_t key_on_flag;
   uint8_t current_stereo;
   uint8_t damp_flag;
   uint8_t lfo_flag;
@@ -187,6 +188,7 @@ int8_t g_transpose_value;
 uint8_t g_speed;
 uint8_t g_speed_count;
 uint8_t g_base_frequency;
+bool g_step_ready;
 
 static void copy_trimmed_field(char *dst, size_t dst_size, const char *src,
                                size_t src_size) {
@@ -281,6 +283,11 @@ void write_ymf278b(Player *p, uint8_t reg, uint8_t val) {
     w(p->ymf278b.dataPtr, 4, reg);
     w(p->ymf278b.dataPtr, 5, val);
   }
+}
+
+static uint8_t compose_wave_ctrl(int ch) {
+  return g_status[ch].key_on_flag | (g_status[ch].current_stereo & 0x0F) |
+         g_status[ch].damp_flag | g_status[ch].lfo_flag;
 }
 
 uint32_t samples_per_tick(uint8_t base_frequency) {
@@ -465,9 +472,6 @@ void calculate_wave(Player *p, int ch) {
 }
 
 void note_on(Player *p, int ch) {
-  calculate_wave(p, ch);
-  g_status[ch].pitch_frequency = g_status[ch].next_frequency;
-
   if (p->noteon) {
     uint8_t oct = g_status[ch].next_frequency_high >> 4;
     printf("CH%02d NoteOn: Note=%d Tone=%d%s Freq=%02X%02X Oct=%d Vol=%02X "
@@ -488,17 +492,9 @@ void note_on(Player *p, int ch) {
            (int)(p->song.header.detune[ch] << 1));
   }
 
+  g_status[ch].key_on_flag = 0x80;
   if (p->solo_ch >= 0 && ch != p->solo_ch)
     return;
-
-  write_ymf278b(p, 0x68 + ch, 0x00);
-  write_ymf278b(p, 0x50 + ch, 0xFF);
-
-  write_ymf278b(p, 0x20 + ch,
-                g_status[ch].next_frequency_low | g_status[ch].next_tone_high);
-  write_ymf278b(p, 0x38 + ch,
-                g_status[ch].next_frequency_high | g_status[ch].pseudo_reverb);
-  write_ymf278b(p, 0x08 + ch, g_status[ch].next_tone_low);
 
   /* Apply WAVES.DAT envelope if available (GM drums included) */
   if (p->waves) {
@@ -522,17 +518,14 @@ void note_on(Player *p, int ch) {
   }
 
   write_ymf278b(p, 0x50 + ch, g_status[ch].volume | 0x01);
-  write_ymf278b(p, 0x68 + ch,
-                0x80 | (g_status[ch].current_stereo & 0x0F) |
-                    g_status[ch].damp_flag | g_status[ch].lfo_flag);
+  write_ymf278b(p, 0x68 + ch, compose_wave_ctrl(ch));
 }
 
 void note_off(Player *p, int ch) {
+  g_status[ch].key_on_flag = 0x00;
   if (p->solo_ch >= 0 && ch != p->solo_ch)
     return;
-  write_ymf278b(p, 0x68 + ch,
-                (g_status[ch].current_stereo & 0x0F) | g_status[ch].damp_flag |
-                    g_status[ch].lfo_flag);
+  write_ymf278b(p, 0x68 + ch, compose_wave_ctrl(ch));
 }
 
 #ifndef LIBMOONSOUND_LIBRARY
@@ -668,6 +661,28 @@ void handle_frequency_mode(Player *p) {
   }
 }
 
+void play_waves(Player *p) {
+  for (int i = 0; i < NR_WAVE_CHANNELS; i++) {
+    uint8_t ev = g_step_buffer[i];
+    if (ev == 0 || ev > NOTE_ON)
+      continue;
+
+    g_status[i].pitch_frequency = g_status[i].next_frequency;
+
+    if (p->solo_ch >= 0 && i != p->solo_ch)
+      continue;
+
+    // Re-trigger note without re-applying WAVES.DAT envelope headers.
+    write_ymf278b(p, 0x68 + i, 0x00);
+    write_ymf278b(p, 0x50 + i, 0xFF);
+    write_ymf278b(p, 0x20 + i,
+                  g_status[i].next_frequency_low | g_status[i].next_tone_high);
+    write_ymf278b(p, 0x38 + i,
+                  g_status[i].next_frequency_high | g_status[i].pseudo_reverb);
+    write_ymf278b(p, 0x08 + i, g_status[i].next_tone_low);
+  }
+}
+
 void play_line(Player *p) {
   for (int i = 0; i < NR_WAVE_CHANNELS; i++) {
     uint8_t ev = g_step_buffer[i];
@@ -682,15 +697,24 @@ void play_line(Player *p) {
       note_off(p, i);
     } else if (ev >= 98 && ev <= 145) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
-      g_status[i].current_wave = p->song.header.wave_numbers[ev - 98];
+      uint8_t wave = ev - WAVE_CHANGE;
+      g_status[i].current_wave = p->song.header.wave_numbers[wave];
+
+      uint8_t volume = p->song.header.wave_volumes[wave];
+      uint8_t level_direct = g_status[i].volume & 0x01;
+      g_status[i].volume = (4 * volume) | level_direct;
     } else if (ev >= 146 && ev <= 177) {
       uint8_t vol = ev - 146;
-      g_status[i].volume = (vol ^ 0x1F) << 1;
+      vol = (vol ^ 0x1F) << 1;
+      uint8_t level_direct = g_status[i].volume & 0x01;
+      g_status[i].volume = (4 * vol) | level_direct;
       if (p->solo_ch < 0 || i == p->solo_ch)
         write_ymf278b(p, 0x50 + i, g_status[i].volume);
     } else if (ev >= 178 && ev <= 192) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].current_stereo = (ev - (178 + 7)) & 0x0F;
+      if (p->solo_ch < 0 || i == p->solo_ch)
+        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
     } else if (ev >= NOTE_LINK && ev <= NOTE_LINK + 18) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       int note = g_status[i].last_note + (ev - (NOTE_LINK + 9));
@@ -752,18 +776,16 @@ void play_line(Player *p) {
     } else if (ev == REVERB_ON) {
       g_status[i].pseudo_reverb = REVERB_ENABLED;
     } else if (ev >= DAMP && ev < LFO) {
+      g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].damp_flag = 0x40;
       if (p->solo_ch < 0 || i == p->solo_ch) {
-        write_ymf278b(p, 0x68 + i,
-                      (g_status[i].current_stereo & 0x0F) | g_status[i].damp_flag |
-                          g_status[i].lfo_flag);
+        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
       }
     } else if (ev >= LFO && ev < REVERB_OFF) {
+      g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].lfo_flag ^= 0x20;
       if (p->solo_ch < 0 || i == p->solo_ch) {
-        write_ymf278b(p, 0x68 + i,
-                      (g_status[i].current_stereo & 0x0F) | g_status[i].damp_flag |
-                          g_status[i].lfo_flag);
+        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
       }
     } else if (ev == REVERB_OFF) {
       g_status[i].pseudo_reverb = REVERB_DISABLED;
@@ -772,13 +794,15 @@ void play_line(Player *p) {
       static const uint8_t g_xls_table[][2] = {
           {49, 0}, {50, 0}, {51, 0}, {52, 0}, {53, 0},
           {54, 0}, {55, 0}, {58, 5}, {3, 0}};
-      g_status[i].lfo_flag |= 0x20;
       if (p->solo_ch < 0 || i == p->solo_ch) {
+        g_status[i].lfo_flag |= 0x20;
+        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
         write_ymf278b(p, 0x80 + i, g_xls_table[index][0]);
         write_ymf278b(p, 0xE0 + i, g_xls_table[index][1]);
-        write_ymf278b(p, 0x68 + i,
-                      (g_status[i].current_stereo & 0x0F) | g_status[i].damp_flag |
-                          g_status[i].lfo_flag);
+        g_status[i].lfo_flag = 0x00;
+        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
+      } else {
+        g_status[i].lfo_flag = 0x00;
       }
     }
   }
@@ -786,6 +810,7 @@ void play_line(Player *p) {
 
 bool next_step(Player *p) {
   bool looped = false;
+  g_step++;
   if (g_step > 15) {
     g_step = 0;
     g_position++;
@@ -825,7 +850,7 @@ bool next_step(Player *p) {
   if (p->dump) {
     static const char *note_names[] = {"C ", "C#", "D ", "D#", "E ", "F ",
                                        "F#", "G ", "G#", "A ", "A#", "B "};
-    printf("%02X:%02X", g_position, g_step - 1);
+    printf("%02X:%02X", g_position, g_step);
     for (int i = 0; i < 24; i++) {
       uint8_t ev = g_step_buffer[i];
       if (ev >= 1 && ev <= 96) {
@@ -845,7 +870,14 @@ bool next_step(Player *p) {
     printf("\n");
   }
 
-  g_step++;
+  for (int i = 0; i < NR_WAVE_CHANNELS; i++) {
+    if (g_step_buffer[i] > 0 && g_step_buffer[i] <= NOTE_ON) {
+      g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
+      calculate_wave(p, i);
+    }
+  }
+
+  g_step_ready = true;
   return looped;
 }
 
@@ -921,6 +953,7 @@ void init_player(Player *p) {
   if (g_speed == 0)
     g_speed = 1;
   g_speed_count = 0;
+  g_step_ready = false;
   for (int i = 0; i < NR_WAVE_CHANNELS; i++) {
     uint8_t wave_idx = p->song.header.start_waves[i];
     if (wave_idx > 0 && wave_idx <= NR_WAVES) {
@@ -941,6 +974,7 @@ void init_player(Player *p) {
       g_status[i].current_wave = 0;
       g_status[i].volume = 0xFF;
     }
+    g_status[i].key_on_flag = 0x00;
     g_status[i].current_stereo = p->song.header.stereo[i] & 0x0F;
     g_status[i].damp_flag = 0;
     g_status[i].lfo_flag = 0;
@@ -990,6 +1024,7 @@ uint32_t calculate_track_samples(Player *p, bool supports_loop, uint32_t loops,
   if (g_speed == 0)
     g_speed = 1;
   g_speed_count = 0;
+  g_step_ready = false;
 
   g_position = -1;
   g_step = 16;
@@ -1445,7 +1480,8 @@ int ms_prepare(MSContext *ctx) {
 
   g_tick_sample_counter = g_samples_per_tick;
   g_position = -1;
-  g_step = 16;
+  g_step = 15;
+  g_step_ready = false;
 
   ctx->p.current_sample = 0;
   ctx->prepared = true;
@@ -1473,9 +1509,14 @@ uint32_t ms_render(MSContext *ctx, int16_t *out_interleaved,
       g_speed_count++;
       if (g_speed_count >= g_speed) {
         g_speed_count = 0;
-        next_step(&ctx->p);
+        if (!g_step_ready)
+          next_step(&ctx->p);
+        play_waves(&ctx->p);
         play_line(&ctx->p);
         process_command(&ctx->p);
+        g_step_ready = false;
+      } else if (g_speed_count == (g_speed - 1)) {
+        next_step(&ctx->p);
       }
     }
 
@@ -1752,7 +1793,8 @@ int main(int argc, char **argv) {
 
   g_tick_sample_counter = g_samples_per_tick;
   g_position = -1;
-  g_step = 16;
+  g_step = 15;
+  g_step_ready = false;
 
   int16_t buffer[BUFFER_SIZE * 2];
 
@@ -1768,9 +1810,14 @@ int main(int argc, char **argv) {
         g_speed_count++;
         if (g_speed_count >= g_speed) {
           g_speed_count = 0;
-          next_step(&p);
+          if (!g_step_ready)
+            next_step(&p);
+          play_waves(&p);
           play_line(&p);
           process_command(&p);
+          g_step_ready = false;
+        } else if (g_speed_count == (g_speed - 1)) {
+          next_step(&p);
         }
       }
 

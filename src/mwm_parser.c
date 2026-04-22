@@ -3,6 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool read_exact(FILE *f, void *dst, size_t bytes) {
+  return fread(dst, 1, bytes, f) == bytes;
+}
+
+static uint16_t read_u16_le(const uint8_t *p) {
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
 bool load_mwm(const char *filename, MwmSong *song) {
   FILE *f = fopen(filename, "rb");
   if (!f)
@@ -25,14 +33,27 @@ bool load_mwm(const char *filename, MwmSong *song) {
 
   memset(song, 0, sizeof(MwmSong));
 
-  // The header is 278 bytes.
-  fread(&song->header, sizeof(MWM_HEADER), 1, f);
+  uint8_t full_position_table[MAX_POSITION + 1];
+  memset(full_position_table, 0, sizeof(full_position_table));
 
   if (edit_mode) {
-    fread(song->position_table, 1, MAX_POSITION + 1, f);
+    if (!read_exact(f, full_position_table, MAX_POSITION + 1) ||
+        !read_exact(f, &song->header, sizeof(MWM_HEADER))) {
+      fclose(f);
+      return false;
+    }
   } else {
-    fread(song->position_table, 1, song->header.song_length + 1, f);
+    if (!read_exact(f, &song->header, sizeof(MWM_HEADER))) {
+      fclose(f);
+      return false;
+    }
+    if (!read_exact(f, full_position_table, song->header.song_length + 1)) {
+      fclose(f);
+      return false;
+    }
   }
+
+  memcpy(song->position_table, full_position_table, song->header.song_length + 1);
 
   uint8_t max_pos = 0;
   for (int i = 0; i <= song->header.song_length; i++) {
@@ -41,27 +62,44 @@ bool load_mwm(const char *filename, MwmSong *song) {
   }
   song->max_pattern = max_pos;
 
-  // Read pattern offsets (2 bytes each for MSX)
-  uint16_t *pattern_offsets = malloc(sizeof(uint16_t) * (max_pos + 1));
-  fread(pattern_offsets, 2, max_pos + 1, f);
+  uint16_t *pattern_offsets = (uint16_t *)malloc(sizeof(uint16_t) * (max_pos + 1));
+  if (!pattern_offsets) {
+    fclose(f);
+    return false;
+  }
+  for (int i = 0; i <= max_pos; i++) {
+    uint8_t raw[2];
+    if (!read_exact(f, raw, sizeof(raw))) {
+      free(pattern_offsets);
+      fclose(f);
+      return false;
+    }
+    pattern_offsets[i] = read_u16_le(raw);
+  }
 
-  // Read patterns in chunks
   song->patterns = calloc(max_pos + 1, sizeof(uint8_t *));
+  if (!song->patterns) {
+    free(pattern_offsets);
+    fclose(f);
+    return false;
+  }
 
   MWM_PATTERN_HEADER ph;
   int pattern_count = 0;
   while (pattern_count <= max_pos) {
-    if (fread(&ph, sizeof(MWM_PATTERN_HEADER), 1, f) != 1)
+    if (!read_exact(f, &ph, sizeof(ph)))
       break;
     if (ph.nr_of_patterns == 0)
       break;
 
-    uint8_t *chunk_data = malloc(ph.size);
-    fread(chunk_data, 1, ph.size, f);
+    uint8_t *chunk_data = (uint8_t *)malloc(ph.size);
+    if (!chunk_data || !read_exact(f, chunk_data, ph.size)) {
+      free(chunk_data);
+      free(pattern_offsets);
+      fclose(f);
+      return false;
+    }
 
-    // The offsets we read earlier are absolute addresses.
-    // We need to find the base address of the first pattern in this chunk.
-    // In LICKIT, the first offset is often 0x8000 or something similar.
     uint16_t base_offset = pattern_offsets[pattern_count];
 
     for (int j = 0; j < ph.nr_of_patterns && (pattern_count + j) <= max_pos;
@@ -69,8 +107,6 @@ bool load_mwm(const char *filename, MwmSong *song) {
       uint16_t current_offset = pattern_offsets[pattern_count + j];
       int relative_offset = current_offset - base_offset;
       if (relative_offset >= 0 && relative_offset < ph.size) {
-        // Find the length of this pattern by looking at the next offset
-        // or the end of the chunk
         int pattern_len;
         if (j < ph.nr_of_patterns - 1) {
           pattern_len = pattern_offsets[pattern_count + j + 1] - current_offset;
@@ -78,26 +114,29 @@ bool load_mwm(const char *filename, MwmSong *song) {
           pattern_len = ph.size - relative_offset;
         }
         if (pattern_len > 0) {
-          song->patterns[pattern_count + j] = malloc(pattern_len);
-          memcpy(song->patterns[pattern_count + j],
-                 chunk_data + relative_offset, pattern_len);
+          song->patterns[pattern_count + j] = (uint8_t *)malloc(pattern_len);
+          if (song->patterns[pattern_count + j]) {
+            memcpy(song->patterns[pattern_count + j], chunk_data + relative_offset,
+                   (size_t)pattern_len);
+          }
         }
       }
     }
+
     pattern_count += ph.nr_of_patterns;
     free(chunk_data);
   }
 
-  // XLFO
+  free(pattern_offsets);
+
   char xlfo_sig[4];
-  if (fread(xlfo_sig, 1, 4, f) == 4) {
+  if (read_exact(f, xlfo_sig, sizeof(xlfo_sig))) {
     if (strncmp(xlfo_sig, "XLFO", 4) == 0) {
-      fread(song->xlfo, 1, 18, f);
+      read_exact(f, song->xlfo, 18);
       song->has_xlfo = true;
     }
   }
 
-  free(pattern_offsets);
   fclose(f);
   return true;
 }
@@ -133,12 +172,25 @@ bool load_mwk(const char *filename, MwkKit *kit, uint8_t *opl4_ram) {
   }
 
   uint8_t size_bytes[3];
-  fread(size_bytes, 1, 3, f);
+  if (!read_exact(f, size_bytes, sizeof(size_bytes))) {
+    fclose(f);
+    return false;
+  }
   kit->total_sample_size =
       size_bytes[0] | (size_bytes[1] << 8) | (size_bytes[2] << 16);
-  fread(&kit->nr_of_waves, 1, 1, f);
-  fread(kit->own_tone_info, 1, MAX_OWN_TONES, f);
-  fread(kit->own_patches, sizeof(OWN_PATCH), kit->nr_of_waves, f);
+  if (!read_exact(f, &kit->nr_of_waves, 1) ||
+      !read_exact(f, kit->own_tone_info, MAX_OWN_TONES)) {
+    fclose(f);
+    return false;
+  }
+  if (kit->nr_of_waves > MAX_OWN_PATCHES) {
+    fclose(f);
+    return false;
+  }
+  if (!read_exact(f, kit->own_patches, sizeof(OWN_PATCH) * kit->nr_of_waves)) {
+    fclose(f);
+    return false;
+  }
 
   if (edit_mode) {
     fseek(f, kit->nr_of_waves * 16, SEEK_CUR);
@@ -152,12 +204,19 @@ bool load_mwk(const char *filename, MwkKit *kit, uint8_t *opl4_ram) {
       uint8_t sample_header[13];
       if (edit_mode)
         fseek(f, 16, SEEK_CUR);
-      fread(sample_header, 1, 13, f);
+      if (!read_exact(f, sample_header, sizeof(sample_header))) {
+        fclose(f);
+        return false;
+      }
 
       uint8_t *ram_header = &opl4_ram[header_address];
-      // Byte 0: Bit 7-6 = Bits/sample, Bit 5-0 = Address bits 21-16
-      ram_header[0] =
-          ((sample_address >> 16) & 0x3F) | (kit->own_tone_info[i] & 0xC0);
+      if (kit->own_tone_info[i] & 0x20) {
+        ram_header[0] = sample_header[12] | (kit->own_tone_info[i] & 0xC0);
+      } else {
+        // Byte 0: Bit 7-6 = Bits/sample, Bit 5-0 = Address bits 21-16
+        ram_header[0] =
+            ((sample_address >> 16) & 0x3F) | (kit->own_tone_info[i] & 0xC0);
+      }
       ram_header[1] = (sample_address >> 8) & 0xFF;
       ram_header[2] = sample_address & 0xFF;
 
@@ -172,11 +231,16 @@ bool load_mwk(const char *filename, MwkKit *kit, uint8_t *opl4_ram) {
       ram_header[10] = sample_header[9];
       ram_header[11] = sample_header[10];
 
-      // Load sample data into RAM at offset relative to 0x200000
-      uint32_t ram_offset = sample_address - 0x200000;
-      uint16_t sample_len = sample_header[11] | (sample_header[12] << 8);
-      fread(&opl4_ram[ram_offset], 1, sample_len, f);
-      sample_address += sample_len;
+      if (!(kit->own_tone_info[i] & 0x20)) {
+        // Load sample data into RAM at offset relative to 0x200000
+        uint32_t ram_offset = sample_address - 0x200000;
+        uint16_t sample_len = sample_header[11] | (sample_header[12] << 8);
+        if (!read_exact(f, &opl4_ram[ram_offset], sample_len)) {
+          fclose(f);
+          return false;
+        }
+        sample_address += sample_len;
+      }
     }
     header_address += 12;
   }
