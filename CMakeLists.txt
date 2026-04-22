@@ -61,4 +61,10 @@ if(MOONSOUND_BUILD_CLI)
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mwm2wav>
                 ${CMAKE_CURRENT_SOURCE_DIR}/mwm2wav
     )
+
+    add_executable(mwm_ref_trace
+        src/mwm_ref_trace.c
+        src/mwm_parser.c
+    )
+    target_link_libraries(mwm_ref_trace m)
 endif()

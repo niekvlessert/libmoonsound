@@ -142,6 +142,10 @@ typedef struct {
   int solo_ch; // -1 = all channels, 0-23 = solo that channel
   uint32_t current_sample;
   uint32_t total_samples;
+  FILE *trace_fp;
+  uint64_t trace_tick;
+  uint64_t trace_seq;
+  uint64_t trace_tick_limit;
 } Player;
 
 typedef struct {
@@ -189,6 +193,7 @@ uint8_t g_speed;
 uint8_t g_speed_count;
 uint8_t g_base_frequency;
 bool g_step_ready;
+uint8_t g_wave_regs[256];
 
 static void copy_trimmed_field(char *dst, size_t dst_size, const char *src,
                                size_t src_size) {
@@ -275,7 +280,35 @@ static void get_song_kit_name(const MwmSong *song, char *out, size_t out_size) {
                      WAVE_KIT_NAME_LENGTH);
 }
 
+static void trace_log(Player *p, const char *fmt, ...) {
+  if (!p || !p->trace_fp || !fmt)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(p->trace_fp, fmt, ap);
+  va_end(ap);
+  fputc('\n', p->trace_fp);
+}
+
+static void trace_log_step(Player *p) {
+  if (!p || !p->trace_fp)
+    return;
+
+  trace_log(p, "STEP,%llu,%d,%d",
+            (unsigned long long)p->trace_tick, g_position, g_step);
+  for (int i = 0; i < STEP_BUFFER_SIZE; i++) {
+    if (g_step_buffer[i] != 0)
+      trace_log(p, "EV,%llu,%d,%u", (unsigned long long)p->trace_tick, i,
+                g_step_buffer[i]);
+  }
+}
+
 void write_ymf278b(Player *p, uint8_t reg, uint8_t val) {
+  g_wave_regs[reg] = val;
+  if (p && p->trace_fp) {
+    trace_log(p, "REG,%llu,%llu,%02X,%02X", (unsigned long long)p->trace_tick,
+              (unsigned long long)p->trace_seq++, reg, val);
+  }
   DEVFUNC_WRITE_A8D8 w;
   SndEmu_GetDeviceFunc(p->ymf278b.devDef, RWF_REGISTER | RWF_WRITE, DEVRW_A8D8,
                        0, (void **)&w);
@@ -518,14 +551,15 @@ void note_on(Player *p, int ch) {
   }
 
   write_ymf278b(p, 0x50 + ch, g_status[ch].volume | 0x01);
-  write_ymf278b(p, 0x68 + ch, compose_wave_ctrl(ch));
+  write_ymf278b(p, 0x68 + ch, 0x80 | (g_status[ch].current_stereo & 0x0F));
 }
 
 void note_off(Player *p, int ch) {
   g_status[ch].key_on_flag = 0x00;
   if (p->solo_ch >= 0 && ch != p->solo_ch)
     return;
-  write_ymf278b(p, 0x68 + ch, compose_wave_ctrl(ch));
+  uint8_t value = g_wave_regs[0x68 + ch];
+  write_ymf278b(p, 0x68 + ch, value & 0x7F);
 }
 
 #ifndef LIBMOONSOUND_LIBRARY
@@ -713,8 +747,10 @@ void play_line(Player *p) {
     } else if (ev >= 178 && ev <= 192) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].current_stereo = (ev - (178 + 7)) & 0x0F;
-      if (p->solo_ch < 0 || i == p->solo_ch)
-        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
+      if (p->solo_ch < 0 || i == p->solo_ch) {
+        uint8_t value = g_wave_regs[0x68 + i] & 0xF0;
+        write_ymf278b(p, 0x68 + i, value & g_status[i].current_stereo);
+      }
     } else if (ev >= NOTE_LINK && ev <= NOTE_LINK + 18) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       int note = g_status[i].last_note + (ev - (NOTE_LINK + 9));
@@ -779,13 +815,15 @@ void play_line(Player *p) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].damp_flag = 0x40;
       if (p->solo_ch < 0 || i == p->solo_ch) {
-        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
+        uint8_t value = g_wave_regs[0x68 + i];
+        write_ymf278b(p, 0x68 + i, value | 0x40);
       }
     } else if (ev >= LFO && ev < REVERB_OFF) {
       g_status[i].frequency_mode = FREQUENCY_MODE_NORMAL;
       g_status[i].lfo_flag ^= 0x20;
       if (p->solo_ch < 0 || i == p->solo_ch) {
-        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
+        uint8_t value = g_wave_regs[0x68 + i];
+        write_ymf278b(p, 0x68 + i, value ^ 0x20);
       }
     } else if (ev == REVERB_OFF) {
       g_status[i].pseudo_reverb = REVERB_DISABLED;
@@ -795,14 +833,11 @@ void play_line(Player *p) {
           {49, 0}, {50, 0}, {51, 0}, {52, 0}, {53, 0},
           {54, 0}, {55, 0}, {58, 5}, {3, 0}};
       if (p->solo_ch < 0 || i == p->solo_ch) {
-        g_status[i].lfo_flag |= 0x20;
-        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
+        uint8_t value = g_wave_regs[0x68 + i];
+        write_ymf278b(p, 0x68 + i, value | 0x20);
         write_ymf278b(p, 0x80 + i, g_xls_table[index][0]);
         write_ymf278b(p, 0xE0 + i, g_xls_table[index][1]);
-        g_status[i].lfo_flag = 0x00;
-        write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
-      } else {
-        g_status[i].lfo_flag = 0x00;
+        write_ymf278b(p, 0x68 + i, value & 0xDF);
       }
     }
   }
@@ -877,6 +912,7 @@ bool next_step(Player *p) {
     }
   }
 
+  trace_log_step(p);
   g_step_ready = true;
   return looped;
 }
@@ -944,6 +980,7 @@ bool next_step_calc(Player *p, bool allow_loop, bool *ended) {
 }
 
 void init_player(Player *p) {
+  memset(g_wave_regs, 0, sizeof(g_wave_regs));
   g_samples_per_step = (SAMPLE_RATE * 10) / 600;
   g_transpose_value = 0;
   g_base_frequency = p->song.header.base_frequency;
@@ -1544,6 +1581,8 @@ int main(int argc, char **argv) {
   bool noteon = false;
   bool debug = false;
   int solo_ch = -1;
+  const char *trace_path = NULL;
+  uint64_t trace_ticks = 0;
   char rom_path[512] = {0};
   char waves_path[512] = {0};
 
@@ -1553,11 +1592,13 @@ int main(int argc, char **argv) {
                                          {"noteon", no_argument, 0, 'n'},
                                          {"debug", no_argument, 0, 'D'},
                                          {"solo", required_argument, 0, 'C'},
+                                         {"trace", required_argument, 0, 'T'},
+                                         {"trace-ticks", required_argument, 0, 't'},
                                          {0, 0, 0, 0}};
 
   int opt;
   int option_index = 0;
-  while ((opt = getopt_long(argc, argv, "s:l::dnDC:", long_options,
+  while ((opt = getopt_long(argc, argv, "s:l::dnDC:T:t:", long_options,
                             &option_index)) != -1) {
     switch (opt) {
     case 's':
@@ -1580,6 +1621,12 @@ int main(int argc, char **argv) {
       break;
     case 'C':
       solo_ch = atoi(optarg);
+      break;
+    case 'T':
+      trace_path = optarg;
+      break;
+    case 't':
+      trace_ticks = (uint64_t)strtoull(optarg, NULL, 10);
       break;
     }
   }
@@ -1607,6 +1654,10 @@ int main(int argc, char **argv) {
   p.noteon = noteon;
   p.debug = debug;
   p.solo_ch = solo_ch;
+  p.trace_fp = NULL;
+  p.trace_tick = 0;
+  p.trace_seq = 0;
+  p.trace_tick_limit = trace_ticks;
 
   if (!load_mwm(mwm_file, &p.song)) {
     printf("Failed to load MWM: %s\n", mwm_file);
@@ -1771,6 +1822,17 @@ int main(int argc, char **argv) {
 
   write_wav_header(out, SAMPLE_RATE, 2, p.total_samples);
 
+  if (trace_path) {
+    p.trace_fp = fopen(trace_path, "w");
+    if (!p.trace_fp) {
+      printf("Failed to open trace file: %s\n", trace_path);
+      fclose(out);
+      return 1;
+    }
+    trace_log(&p, "TRACE_VERSION,1");
+    trace_log(&p, "SONG,%s", mwm_file);
+  }
+
   // Pre-roll: 100ms of silence to let emulator initialize
   {
     int16_t silent[4410 * 2] = {0};
@@ -1797,6 +1859,9 @@ int main(int argc, char **argv) {
     for (uint32_t i = 0; i < to_render; i++) {
       if (g_tick_sample_counter >= g_samples_per_tick) {
         g_tick_sample_counter = 0;
+        p.trace_tick++;
+        p.trace_seq = 0;
+        trace_log(&p, "TICK,%llu", (unsigned long long)p.trace_tick);
         handle_frequency_mode(&p);
         g_speed_count++;
         if (g_speed_count >= g_speed) {
@@ -1809,6 +1874,11 @@ int main(int argc, char **argv) {
           g_step_ready = false;
         } else if (g_speed_count == (g_speed - 1)) {
           next_step(&p);
+        }
+        if (p.trace_tick_limit && p.trace_tick >= p.trace_tick_limit &&
+            p.trace_fp) {
+          fclose(p.trace_fp);
+          p.trace_fp = NULL;
         }
       }
 
@@ -1842,6 +1912,8 @@ int main(int argc, char **argv) {
 
   SndEmu_Stop(&p.ymf278b);
   SndEmu_FreeDevLinkData(&p.ymf278b);
+  if (p.trace_fp)
+    fclose(p.trace_fp);
   free(p.rom);
   free(p.ram);
   free_mwm(&p.song);
