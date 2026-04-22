@@ -952,7 +952,7 @@ void init_player(Player *p) {
   g_speed = p->song.header.tempo;
   if (g_speed == 0)
     g_speed = 1;
-  g_speed_count = 0;
+  g_speed_count = g_speed - 3;
   g_step_ready = false;
   for (int i = 0; i < NR_WAVE_CHANNELS; i++) {
     uint8_t wave_idx = p->song.header.start_waves[i];
@@ -961,15 +961,6 @@ void init_player(Player *p) {
       uint8_t vol = p->song.header.wave_volumes[wave_idx - 1];
       uint8_t level_direct = vol & 0x01;
       g_status[i].volume = (4 * vol) | level_direct;
-
-      g_step_buffer[i] = 49;
-      calculate_wave(p, i);
-      write_ymf278b(p, 0x20 + i,
-                    g_status[i].next_frequency_low |
-                        g_status[i].next_tone_high);
-      write_ymf278b(p, 0x38 + i, g_status[i].next_frequency_high);
-      write_ymf278b(p, 0x08 + i, g_status[i].next_tone_low);
-      g_step_buffer[i] = 0;
     } else {
       g_status[i].current_wave = 0;
       g_status[i].volume = 0xFF;
@@ -986,8 +977,8 @@ void init_player(Player *p) {
     g_status[i].detune_value = p->song.header.detune[i] << 1;
     g_status[i].pitch_frequency = 0;
 
-    write_ymf278b(p, 0x50 + i, 0xFF);
-    write_ymf278b(p, 0x68 + i, 0x00);
+    write_ymf278b(p, 0x50 + i, g_status[i].volume);
+    write_ymf278b(p, 0x68 + i, compose_wave_ctrl(i));
   }
 }
 
@@ -1023,7 +1014,7 @@ uint32_t calculate_track_samples(Player *p, bool supports_loop, uint32_t loops,
   g_speed = p->song.header.tempo;
   if (g_speed == 0)
     g_speed = 1;
-  g_speed_count = 0;
+  g_speed_count = g_speed - 3;
   g_step_ready = false;
 
   g_position = -1;
