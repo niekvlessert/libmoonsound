@@ -99,6 +99,11 @@ Public header:
 - `int ms_load_rom_file(MSContext *ctx, const char *rom_path);`
 - `int ms_load_waves_file(MSContext *ctx, const char *waves_path);`
 
+If an MWK is required and you did not call `ms_load_mwk_file`, `ms_prepare` now
+tries:
+- `<MWM directory>/<wave_kit_name>.MWK` (from MWM header)
+- fallback: same basename as MWM (legacy behavior)
+
 ### Playback Configuration
 
 - `void ms_set_seconds_limit(MSContext *ctx, int seconds);`
@@ -106,6 +111,9 @@ Public header:
 - `void ms_set_loop_count(MSContext *ctx, int loops);`
 - `bool ms_supports_loop(MSContext *ctx);`
 - `bool ms_requires_mwk(MSContext *ctx);`
+- `const char *ms_get_expected_mwk_name(MSContext *ctx);`
+- `const char *ms_get_resolved_mwk_path(MSContext *ctx);`
+- `const char *ms_get_last_error(MSContext *ctx);`
 
 ### Length / Rendering
 
@@ -122,4 +130,3 @@ until it returns 0.
 - The current core uses global playback state internally, so only one
   `MSContext` should be active at a time.
 - `ms_prepare` must be called after loading the MWM/MWK and ROM/WAVES files.
-

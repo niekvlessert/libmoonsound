@@ -24,6 +24,9 @@ void ms_set_loop_count(MSContext *ctx, int loops);
 
 bool ms_supports_loop(MSContext *ctx);
 bool ms_requires_mwk(MSContext *ctx);
+const char *ms_get_expected_mwk_name(MSContext *ctx);
+const char *ms_get_resolved_mwk_path(MSContext *ctx);
+const char *ms_get_last_error(MSContext *ctx);
 
 uint32_t ms_calculate_length_samples(MSContext *ctx, int loops);
 uint32_t ms_get_total_samples(MSContext *ctx);

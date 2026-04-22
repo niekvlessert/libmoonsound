@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <ctype.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -185,6 +187,91 @@ int8_t g_transpose_value;
 uint8_t g_speed;
 uint8_t g_speed_count;
 uint8_t g_base_frequency;
+
+static void copy_trimmed_field(char *dst, size_t dst_size, const char *src,
+                               size_t src_size) {
+  if (!dst || dst_size == 0)
+    return;
+  dst[0] = '\0';
+  if (!src || src_size == 0)
+    return;
+
+  size_t len = src_size;
+  while (len > 0 &&
+         (((unsigned char)src[len - 1]) == 0 || src[len - 1] == ' '))
+    len--;
+
+  if (len >= dst_size)
+    len = dst_size - 1;
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+}
+
+static int ascii_casecmp(const char *a, const char *b) {
+  unsigned char ca, cb;
+  if (!a || !b)
+    return (a == b) ? 0 : 1;
+  while (*a && *b) {
+    ca = (unsigned char)toupper((unsigned char)*a);
+    cb = (unsigned char)toupper((unsigned char)*b);
+    if (ca != cb)
+      return (int)ca - (int)cb;
+    a++;
+    b++;
+  }
+  ca = (unsigned char)toupper((unsigned char)*a);
+  cb = (unsigned char)toupper((unsigned char)*b);
+  return (int)ca - (int)cb;
+}
+
+static bool is_none_kit_name(const char *name) {
+  return name && name[0] && ascii_casecmp(name, "NONE") == 0;
+}
+
+static bool make_same_name_mwk_path(const char *mwm_path, char *out,
+                                    size_t out_size) {
+  if (!mwm_path || !out || out_size == 0)
+    return false;
+
+  size_t len = strlen(mwm_path);
+  if (len + 5 >= out_size)
+    return false;
+  strcpy(out, mwm_path);
+
+  char *last_slash = strrchr(out, '/');
+  char *dot = strrchr(out, '.');
+  if (dot && (!last_slash || dot > last_slash))
+    strcpy(dot, ".MWK");
+  else
+    strcat(out, ".MWK");
+  return true;
+}
+
+static bool make_header_name_mwk_path(const char *mwm_path, const char *kit_name,
+                                      char *out, size_t out_size) {
+  if (!mwm_path || !kit_name || !kit_name[0] || !out || out_size == 0)
+    return false;
+
+  const char *last_slash = strrchr(mwm_path, '/');
+  if (!last_slash)
+    return snprintf(out, out_size, "%s.MWK", kit_name) < (int)out_size;
+
+  size_t dir_len = (size_t)(last_slash - mwm_path + 1);
+  if (dir_len + strlen(kit_name) + 4 + 1 > out_size)
+    return false;
+  memcpy(out, mwm_path, dir_len);
+  out[dir_len] = '\0';
+  strcat(out, kit_name);
+  strcat(out, ".MWK");
+  return true;
+}
+
+static void get_song_kit_name(const MwmSong *song, char *out, size_t out_size) {
+  if (!song || !out || out_size == 0)
+    return;
+  copy_trimmed_field(out, out_size, song->header.wave_kit_name,
+                     WAVE_KIT_NAME_LENGTH);
+}
 
 void write_ymf278b(Player *p, uint8_t reg, uint8_t val) {
   DEVFUNC_WRITE_A8D8 w;
@@ -942,10 +1029,41 @@ struct MSContext {
   bool seconds_set;
   int seconds_limit;
   int loop_count;
+  char mwm_path[512];
+  bool mwm_path_set;
+  char mwk_header_name[WAVE_KIT_NAME_LENGTH + 1];
   char mwk_path[512];
   bool mwk_path_set;
+  char resolved_mwk_path[512];
+  char last_error[256];
   bool prepared;
 };
+
+static void ms_clear_error(MSContext *ctx) {
+  if (!ctx)
+    return;
+  ctx->last_error[0] = '\0';
+}
+
+static void ms_set_error(MSContext *ctx, const char *fmt, ...) {
+  if (!ctx || !fmt)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(ctx->last_error, sizeof(ctx->last_error), fmt, ap);
+  va_end(ap);
+}
+
+static bool ms_try_load_mwk_path(MSContext *ctx, const char *path) {
+  if (!ctx || !path || !path[0] || !ctx->p.ram)
+    return false;
+  if (!load_mwk(path, &ctx->p.kit, ctx->p.ram))
+    return false;
+  ctx->mwk_loaded = true;
+  strncpy(ctx->resolved_mwk_path, path, sizeof(ctx->resolved_mwk_path) - 1);
+  ctx->resolved_mwk_path[sizeof(ctx->resolved_mwk_path) - 1] = '\0';
+  return true;
+}
 
 MSContext *ms_create(void) {
   MSContext *ctx = (MSContext *)calloc(1, sizeof(MSContext));
@@ -953,6 +1071,7 @@ MSContext *ms_create(void) {
     return NULL;
   ctx->loop_count = 1;
   ctx->p.solo_ch = -1;
+  ms_clear_error(ctx);
   return ctx;
 }
 
@@ -1035,26 +1154,43 @@ int ms_load_waves_file(MSContext *ctx, const char *waves_path) {
 int ms_load_mwm_file(MSContext *ctx, const char *mwm_path) {
   if (!ctx || !mwm_path)
     return 0;
+  ms_clear_error(ctx);
   free_mwm(&ctx->p.song);
   memset(&ctx->p.song, 0, sizeof(ctx->p.song));
   if (!load_mwm(mwm_path, &ctx->p.song))
+  {
+    ms_set_error(ctx, "Failed to load MWM: %s", mwm_path);
     return 0;
+  }
   ctx->mwm_loaded = true;
   ctx->supports_loop = song_supports_loop(&ctx->p.song);
   ctx->requires_mwk = song_requires_mwk(&ctx->p.song);
+  ctx->mwk_loaded = false;
+  ctx->mwk_path_set = false;
+  ctx->mwk_path[0] = '\0';
+  ctx->resolved_mwk_path[0] = '\0';
+
+  strncpy(ctx->mwm_path, mwm_path, sizeof(ctx->mwm_path) - 1);
+  ctx->mwm_path[sizeof(ctx->mwm_path) - 1] = '\0';
+  ctx->mwm_path_set = true;
+  get_song_kit_name(&ctx->p.song, ctx->mwk_header_name,
+                    sizeof(ctx->mwk_header_name));
   return 1;
 }
 
 int ms_load_mwk_file(MSContext *ctx, const char *mwk_path) {
   if (!ctx || !mwk_path)
     return 0;
+  ms_clear_error(ctx);
   strncpy(ctx->mwk_path, mwk_path, sizeof(ctx->mwk_path) - 1);
+  ctx->mwk_path[sizeof(ctx->mwk_path) - 1] = '\0';
   ctx->mwk_path_set = true;
   if (!ctx->p.ram)
     return 1;
-  if (!load_mwk(ctx->mwk_path, &ctx->p.kit, ctx->p.ram))
+  if (!ms_try_load_mwk_path(ctx, ctx->mwk_path)) {
+    ms_set_error(ctx, "Failed to load MWK: %s", ctx->mwk_path);
     return 0;
-  ctx->mwk_loaded = true;
+  }
   return 1;
 }
 
@@ -1090,6 +1226,24 @@ bool ms_requires_mwk(MSContext *ctx) {
   return ctx->requires_mwk;
 }
 
+const char *ms_get_expected_mwk_name(MSContext *ctx) {
+  if (!ctx)
+    return "";
+  return ctx->mwk_header_name;
+}
+
+const char *ms_get_resolved_mwk_path(MSContext *ctx) {
+  if (!ctx)
+    return "";
+  return ctx->resolved_mwk_path;
+}
+
+const char *ms_get_last_error(MSContext *ctx) {
+  if (!ctx)
+    return "";
+  return ctx->last_error;
+}
+
 uint32_t ms_calculate_length_samples(MSContext *ctx, int loops) {
   if (!ctx || !ctx->mwm_loaded)
     return 0;
@@ -1108,8 +1262,14 @@ uint32_t ms_get_total_samples(MSContext *ctx) {
 }
 
 int ms_prepare(MSContext *ctx) {
-  if (!ctx || !ctx->mwm_loaded || !ctx->rom_loaded || !ctx->waves_loaded)
+  if (!ctx || !ctx->mwm_loaded || !ctx->rom_loaded || !ctx->waves_loaded) {
+    if (ctx)
+      ms_set_error(ctx, "Missing required assets (MWM/ROM/WAVES).");
     return 0;
+  }
+  ms_clear_error(ctx);
+  ctx->resolved_mwk_path[0] = '\0';
+  ctx->mwk_loaded = false;
 
   if (ctx->loop_count < 0)
     ctx->loop_count = 0;
@@ -1133,23 +1293,71 @@ int ms_prepare(MSContext *ctx) {
   cfg.clock = 33868800; // OPL4 clock
   cfg.smplRate = SAMPLE_RATE;
 
-  if (SndEmu_Start(DEVID_YMF278B, &cfg, &ctx->p.ymf278b) != 0)
+  if (SndEmu_Start(DEVID_YMF278B, &cfg, &ctx->p.ymf278b) != 0) {
+    ms_set_error(ctx, "Failed to start YMF278B emulator.");
     return 0;
+  }
 
   if (!ctx->p.ram)
     ctx->p.ram = (uint8_t *)malloc(2 * 1024 * 1024);
-  if (!ctx->p.ram)
+  if (!ctx->p.ram) {
+    ms_set_error(ctx, "Failed to allocate OPL4 RAM.");
     return 0;
+  }
   memset(ctx->p.ram, 0, 2 * 1024 * 1024);
 
   if (ctx->requires_mwk) {
-    if (!ctx->mwk_path_set)
-      return 0;
-    if (!load_mwk(ctx->mwk_path, &ctx->p.kit, ctx->p.ram))
-      return 0;
-    ctx->mwk_loaded = true;
+    if (ctx->mwk_path_set) {
+      if (!ms_try_load_mwk_path(ctx, ctx->mwk_path)) {
+        ms_set_error(ctx, "Failed to load MWK: %s", ctx->mwk_path);
+        return 0;
+      }
+    } else {
+      char header_path[512] = {0};
+      char fallback_path[512] = {0};
+      bool have_header_path = false;
+      bool have_fallback_path = false;
+
+      if (ctx->mwm_path_set &&
+          ctx->mwk_header_name[0] &&
+          !is_none_kit_name(ctx->mwk_header_name)) {
+        have_header_path = make_header_name_mwk_path(
+            ctx->mwm_path, ctx->mwk_header_name, header_path,
+            sizeof(header_path));
+      }
+      if (ctx->mwm_path_set) {
+        have_fallback_path =
+            make_same_name_mwk_path(ctx->mwm_path, fallback_path,
+                                    sizeof(fallback_path));
+      }
+
+      if (have_header_path && ms_try_load_mwk_path(ctx, header_path)) {
+        /* loaded */
+      } else if (have_fallback_path &&
+                 (!have_header_path || strcmp(header_path, fallback_path) != 0) &&
+                 ms_try_load_mwk_path(ctx, fallback_path)) {
+        /* loaded */
+      } else {
+        if (have_header_path && have_fallback_path &&
+            strcmp(header_path, fallback_path) != 0) {
+          ms_set_error(ctx,
+                       "MWK load failed. Header kit=\"%s\". Tried \"%s\" then \"%s\".",
+                       ctx->mwk_header_name[0] ? ctx->mwk_header_name : "(empty)",
+                       header_path, fallback_path);
+        } else if (have_fallback_path) {
+          ms_set_error(ctx,
+                       "MWK load failed. Tried \"%s\" (header kit=\"%s\").",
+                       fallback_path,
+                       ctx->mwk_header_name[0] ? ctx->mwk_header_name : "(empty)");
+        } else {
+          ms_set_error(ctx,
+                       "MWK load failed. Could not derive MWK path from MWM path.");
+        }
+        return 0;
+      }
+    }
   } else if (ctx->mwk_path_set) {
-    if (load_mwk(ctx->mwk_path, &ctx->p.kit, ctx->p.ram))
+    if (ms_try_load_mwk_path(ctx, ctx->mwk_path))
       ctx->mwk_loaded = true;
   }
 
@@ -1322,14 +1530,6 @@ int main(int argc, char **argv) {
   char *mwm_file = argv[optind];
   char *output_file = argv[optind + 1];
 
-  char mwk_path[256];
-  strcpy(mwk_path, mwm_file);
-  char *dot = strrchr(mwk_path, '.');
-  if (dot)
-    strcpy(dot, ".MWK");
-  else
-    strcat(mwk_path, ".MWK");
-
   // Resolve ROM/WAVES paths relative to the executable location.
   char exe_path[512] = {0};
   get_executable_dir(argv[0], exe_path, sizeof(exe_path));
@@ -1359,6 +1559,23 @@ int main(int argc, char **argv) {
 
   bool requires_mwk = song_requires_mwk(&p.song);
   printf("MWK required: %s\n", requires_mwk ? "yes" : "no");
+
+  char mwk_header_name[WAVE_KIT_NAME_LENGTH + 1] = {0};
+  char mwk_header_path[512] = {0};
+  char mwk_fallback_path[512] = {0};
+  bool have_header_path = false;
+  bool have_fallback_path = false;
+
+  get_song_kit_name(&p.song, mwk_header_name, sizeof(mwk_header_name));
+  if (mwm_file && mwk_header_name[0] && !is_none_kit_name(mwk_header_name)) {
+    have_header_path = make_header_name_mwk_path(
+        mwm_file, mwk_header_name, mwk_header_path, sizeof(mwk_header_path));
+  }
+  if (mwm_file) {
+    have_fallback_path =
+        make_same_name_mwk_path(mwm_file, mwk_fallback_path,
+                                sizeof(mwk_fallback_path));
+  }
 
   if (loop_count < 0)
     loop_count = 0;
@@ -1416,8 +1633,27 @@ int main(int argc, char **argv) {
   }
 
   if (requires_mwk) {
-    if (!load_mwk(mwk_path, &p.kit, p.ram)) {
-      printf("Warning: Failed to load MWK: %s\n", mwk_path);
+    bool loaded = false;
+    if (have_header_path)
+      loaded = load_mwk(mwk_header_path, &p.kit, p.ram);
+    if (!loaded && have_fallback_path &&
+        (!have_header_path || strcmp(mwk_header_path, mwk_fallback_path) != 0))
+      loaded = load_mwk(mwk_fallback_path, &p.kit, p.ram);
+
+    if (!loaded) {
+      if (have_header_path && have_fallback_path &&
+          strcmp(mwk_header_path, mwk_fallback_path) != 0) {
+        printf("Error: MWK required but load failed. Header kit=\"%s\". Tried:\n",
+               mwk_header_name[0] ? mwk_header_name : "(empty)");
+        printf("  1) %s\n", mwk_header_path);
+        printf("  2) %s\n", mwk_fallback_path);
+      } else if (have_fallback_path) {
+        printf("Error: MWK required but load failed. Tried: %s\n",
+               mwk_fallback_path);
+      } else {
+        printf("Error: MWK required but no MWK path could be derived.\n");
+      }
+      return 1;
     }
   }
 
