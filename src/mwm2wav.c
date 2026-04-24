@@ -918,7 +918,7 @@ bool next_step(Player *p) {
 }
 
 bool song_supports_loop(const MwmSong *song) {
-  return song->header.loop_position < song->header.song_length;
+  return song->header.loop_position <= song->header.song_length;
 }
 
 bool song_requires_mwk(const MwmSong *song) {
@@ -1361,6 +1361,12 @@ uint32_t ms_get_total_samples(MSContext *ctx) {
   if (!ctx)
     return 0;
   return ctx->p.total_samples;
+}
+
+void ms_reset_sample_counter(MSContext *ctx) {
+  if (!ctx)
+    return;
+  ctx->p.current_sample = 0;
 }
 
 int ms_prepare(MSContext *ctx) {

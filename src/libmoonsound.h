@@ -31,6 +31,7 @@ const char *ms_get_last_error(MSContext *ctx);
 
 uint32_t ms_calculate_length_samples(MSContext *ctx, int loops);
 uint32_t ms_get_total_samples(MSContext *ctx);
+void ms_reset_sample_counter(MSContext *ctx);
 
 int ms_prepare(MSContext *ctx);
 uint32_t ms_render(MSContext *ctx, int16_t *out_interleaved,
