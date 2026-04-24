@@ -1310,6 +1310,12 @@ void ms_set_loop_count(MSContext *ctx, int loops) {
   ctx->loop_count = loops;
 }
 
+void ms_set_solo_channel(MSContext *ctx, int ch) {
+  if (!ctx)
+    return;
+  ctx->p.solo_ch = (ch >= 0 && ch < NR_WAVE_CHANNELS) ? ch : -1;
+}
+
 bool ms_supports_loop(MSContext *ctx) {
   if (!ctx)
     return false;

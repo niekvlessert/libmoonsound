@@ -21,6 +21,7 @@ int ms_load_waves_file(MSContext *ctx, const char *waves_path);
 void ms_set_seconds_limit(MSContext *ctx, int seconds);
 void ms_clear_seconds_limit(MSContext *ctx);
 void ms_set_loop_count(MSContext *ctx, int loops);
+void ms_set_solo_channel(MSContext *ctx, int ch);
 
 bool ms_supports_loop(MSContext *ctx);
 bool ms_requires_mwk(MSContext *ctx);
